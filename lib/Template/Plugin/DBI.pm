@@ -1,5 +1,5 @@
 #==============================================================================
-# 
+#
 # Template::Plugin::DBI
 #
 # DESCRIPTION
@@ -10,148 +10,188 @@
 #   with some reworking by Andy Wardley <abw@kfs.org> and other
 #   contributions from Craig Barratt <craig@arraycomm.com>,
 #   Dave Hodgkinson <daveh@davehodgkinson.com> and Rafael Kitover
-#   <caelum@debian.org>
+#   <caelum@debian.org>.
+#   Since 2010 Jens Rehsack <sno@NetBSD.org> maintains this module.
 #
 # COPYRIGHT
 #   Copyright (C) 1999-2000 Simon Matthews.  All Rights Reserved.
 #   Copyright (C) 2006 Andy Wardley.  All Rights Reserved.
+#   Copyright (C) 2010 Jens Rehsack.  All Rights Reserved.
 #
 #   This module is free software; you can redistribute it and/or
 #   modify it under the same terms as Perl itself.
 #
 # REVISION
 #   $Id$
-# 
+#
 #==============================================================================
 
 package Template::Plugin::DBI;
 
 use strict;
 use warnings;
-use Template::Exception;
-use base 'Template::Plugin';
+
+use Carp qw(croak carp);
 use DBI;
 
-our $VERSION  = 2.64;
+use Template::Exception;
+use base 'Template::Plugin';
+
+our $VERSION  = 2.65;
 our $DEBUG    = 0 unless defined $DEBUG;
 our $QUERY    = 'Template::Plugin::DBI::Query';
 our $ITERATOR = 'Template::Plugin::DBI::Iterator';
 
+my $threads_enabled = 0;
+my $have_tvr        = 0;
+
+BEGIN
+{
+    $INC{"threads.pm"} and eval {
+        ++$threads_enabled;
+        require threads::variable::reap;
+        ++$have_tvr;
+    };
+
+    $have_tvr
+      and threads::variable::reap->import(qw(reap reapref));
+}
 
 # alias _connect() to connect() for backwards compatability
 *_connect = \*connect;
 
-
 #------------------------------------------------------------------------
 # new($context, @params)
 #
-# Constructor which returns a reference to a new DBI plugin object. 
+# Constructor which returns a reference to a new DBI plugin object.
 # A connection string (dsn), user name and password may be passed as
 # positional arguments or a hash array of connection parameters can be
-# passed to initialise a connection.  Otherwise, an unconnected DBI 
+# passed to initialise a connection.  Otherwise, an unconnected DBI
 # plugin object is returned.
 #------------------------------------------------------------------------
 
-sub new {
-    my $class   = shift;
-    my $context = shift;
-    my $self    = ref $class ? $class : bless { 
-        _CONTEXT => $context, 
-        _STH     => [ ],
-    }, $class;
+sub new
+{
+    my ( $class, $context, @connect_args ) = @_;
+    my $self =
+      ref $class
+      ? $class
+      : bless {
+                _CONTEXT => $context,
+                _STH     => undef,
+              }, $class;
 
-    $self->connect(@_) if @_;
+    $self->connect(@connect_args) if @connect_args;
 
     return $self;
 }
 
-
 #------------------------------------------------------------------------
 # connect( $data_source, $username, $password, $attributes )
-# connect( { data_source => 'dbi:driver:database' 
-#	     username    => 'foo' 
+# connect( { data_source => 'dbi:driver:database'
+#	     username    => 'foo'
 #	     password    => 'bar' } )
 #
-# Opens a DBI connection for the plugin. 
+# Opens a DBI connection for the plugin.
 #------------------------------------------------------------------------
 
-sub connect {
-    my $self   = shift;
-    my $params = ref $_[-1] eq 'HASH' ? pop(@_) : { };
-    my ($dbh, $dsn, $user, $pass, $klobs);
+sub connect
+{
+    my $self = shift;
+    my $params = ref $_[-1] eq 'HASH' ? pop(@_) : {};
+    my ( $dbh, $dsn, $user, $pass, $klobs );
 
     # set debug flag
-    $DEBUG = $params->{ debug } if exists $params->{ debug };
-    $self->{ _DEBUG } = $params->{ debug } || 0;
+    exists $params->{debug} and $DEBUG = $params->{debug};
+    $self->{_DEBUG} = $params->{debug} || 0;
 
-    # fetch 'dbh' named paramater or use positional arguments or named 
+    # fetch 'dbh' named paramater or use positional arguments or named
     # parameters to specify 'dsn', 'user' and 'pass'
 
-    if ($dbh = $params->{ dbh }) {
+    if ( $dbh = $params->{dbh} )
+    {
         # disconnect any existing database handle that we previously opened
-        $self->{ _DBH }->disconnect()
-            if $self->{ _DBH } && $self->{ _DBH_CONNECT };
-        
-        # store new dbh but leave _DBH_CONNECT false to prevent us 
+        $self->{_DBH}->disconnect()
+          if $self->{_DBH} && $self->{_DBH_CONNECT};
+
+        # store new dbh but leave _DBH_CONNECT false to prevent us
         # from automatically closing it in the future
-        $self->{ _DBH } = $dbh;
-        $self->{ _DBH_CONNECT } = 0;
+        $self->{_DBH}         = $dbh;
+        $self->{_DBH_CONNECT} = 0;
     }
-    else {
-        # certain Perl programmers are known to have problems with short 
+    else
+    {
+        # certain Perl programmers are known to have problems with short
         # term memory loss (see Tie::Hash::Cannabinol) so we let the poor
         # blighters fumble any kind of argument that looks like it might
-        # identify the database 
+        # identify the database
 
-        $dsn = shift 
-            || delete $params->{ data_source } 
-            || delete $params->{ database } 
-            || delete $params->{ connect } 
-            || delete $params->{ dsn }
-            || delete $params->{ db }
-            || $ENV{DBI_DSN}
-            || return $self->_throw('data source not defined');
+        $dsn =
+             shift
+          || delete $params->{data_source}
+          || delete $params->{database}
+          || delete $params->{connect}
+          || delete $params->{dsn}
+          || delete $params->{db}
+          || delete $self->{_DSN}
+          || $ENV{DBI_DSN}
+          || return $self->_throw('data source not defined');
 
         # add 'dbi:' prefix if it's not there
         $dsn = "dbi:$dsn" unless $dsn =~ /^dbi:/i;
 
-        $user = shift
-            || $params->{ username } 
-            || $params->{ user };
-        
-        $pass = shift 
-            || $params->{ password } 
-            || $params->{ pass };
+        $user =
+             shift
+          || delete $params->{username}
+          || delete $params->{user}
+          || delete $self->{_USER};
 
-        # save connection data because we might need it later to do a tie()
-        @$self{ qw( _DSN _USER _PASS ) } = ($dsn, $user, $pass);
-
-        # reuse existing database handle if connection params match
-        my $connect = join(':', $dsn || '', $user || '', $pass || '');
-        return ''
-            if $self->{ _DBH } && $self->{ _DBH_CONNECT } eq $connect;
-	
-        # otherwise disconnect any existing database handle that we opened
-        $self->{ _DBH }->disconnect()
-            if $self->{ _DBH } && $self->{ _DBH_CONNECT };
-	    
-        # don't need DBI to automatically print errors because all calls go 
-        # via this plugin interface and we always check return values
-        $params->{ PrintError } = 0
-            unless defined $params->{ PrintError };
+        $pass =
+             shift
+          || delete $params->{password}
+          || delete $params->{pass}
+          || delete $self->{_PASS};
 
         $user ||= '';
         $pass ||= '';
-        $self->{ _DBH } = DBI->connect_cached( $dsn, $user, $pass, $params )
-            || return $self->_throw("DBI connect failed: $DBI::errstr");
+
+        # save connection data because we might need it later to do a tie()
+        @$self{qw( _DSN _USER _PASS )} = ( $dsn, $user, $pass );
+
+        # reuse existing database handle if connection params match
+        my $connect = join( ':', $dsn, $user, $pass );
+        return ''
+          if $self->connected() && $self->{_DBH_CONNECT} eq $connect;
+
+        # otherwise disconnect any existing database handle that we opened
+        $self->disconnect();
+
+        # don't need DBI to automatically print errors because all calls go
+        # via this plugin interface and we always check return values
+        $params->{PrintError} = 0
+          unless defined $params->{PrintError};
+        $params->{RaiseError} = 0
+          unless defined $params->{RaiseError};
+
+        $self->{_DBH} = DBI->connect_cached( $dsn, $user, $pass, $params )
+          || return $self->_throw("DBI connect failed: $DBI::errstr");
 
         # store the connection parameters
-        $self->{ _DBH_CONNECT } = $connect;
+        $self->{_DBH_CONNECT} = $connect;
     }
+
+    $have_tvr
+      and reap( $self->{_DBH} )
+      and reap( $self->{_STH} );
 
     return '';
 }
 
+sub connected
+{
+    my $self = $_[0];
+    return $self->{_DBH} && $self->{_DBH}->isa('DBI::db');
+}
 
 #------------------------------------------------------------------------
 # disconnect()
@@ -159,14 +199,18 @@ sub connect {
 # Disconnects the current active database connection.
 #------------------------------------------------------------------------
 
-sub disconnect {
-    my $self = shift;
-    $self->{ _DBH }->disconnect() 
-        if $self->{ _DBH };
-    delete $self->{ _DBH };
+sub disconnect
+{
+    my $self = $_[0];
+    delete( $self->{_STH} );    # first DESTROY any queries
+    $self->connected() and $self->{_DBH}->disconnect();
+    delete $self->{_DBH};
+    delete $self->{_DSN};
+    delete $self->{_USER};
+    delete $self->{_PASS};
+    delete $self->{_DBH_CONNECT};
     return '';
 }
-
 
 #------------------------------------------------------------------------
 # tie( $table, $key )
@@ -175,46 +219,48 @@ sub disconnect {
 # key.
 #------------------------------------------------------------------------
 
-sub tie {
+sub tie
+{
     my $self = shift;
-    my $params = ref $_[-1] eq 'HASH' ? pop(@_) : { };
-    my ($table, $key, $klobs, $debug, %hash);
+    my $params = ref $_[-1] eq 'HASH' ? pop(@_) : {};
+    my ( $table, $key, $klobs, $debug, %hash );
 
     eval { require Tie::DBI };
     $self->_throw("failed to load Tie::DBI module: $@") if $@;
 
-    $table = shift 
-        || $params->{ table } 
-        || $self->_throw('table not defined');
+    $table =
+         shift
+      || $params->{table}
+      || $self->_throw('table not defined');
 
-    $key = shift 
-        || $params->{ key } 
-        || $self->_throw('key not defined');
+    $key =
+         shift
+      || $params->{key}
+      || $self->_throw('key not defined');
 
     # Achtung der Klobberman!
-    $klobs = $params->{ clobber };
-    $klobs = $params->{ CLOBBER } unless defined $klobs;
+    $klobs = $params->{clobber};
+    $klobs = $params->{CLOBBER} unless defined $klobs;
 
-    # going the extra mile to allow user to use UPPER or lower case or 
+    # going the extra mile to allow user to use UPPER or lower case or
     # inherit internel debug flag set by connect()
-    $debug = $params->{ debug };
-    $debug = $params->{ DEBUG } unless defined $debug;
-    $debug = $self->{ _DEBUG } unless defined $debug;
+    $debug = $params->{debug};
+    $debug = $params->{DEBUG} unless defined $debug;
+    $debug = $self->{_DEBUG} unless defined $debug;
 
     tie %hash, 'Tie::DBI', {
-        %$params,   # any other Tie::DBI options like DEBUG, WARN, etc
-        db       => $self->{ _DBH  } || $self->{ _DSN },
-        user     => $self->{ _USER },
-        password => $self->{ _PASS },
+        %$params,    # any other Tie::DBI options like DEBUG, WARN, etc
+        db => $self->{_DBH} || $self->{_DSN},
+        user     => $self->{_USER},
+        password => $self->{_PASS},
         table    => $table,
         key      => $key,
         CLOBBER  => $klobs || 0,
         DEBUG    => $debug || 0,
-    };
+                           };
 
     return \%hash;
 }
-
 
 #------------------------------------------------------------------------
 # prepare($sql)
@@ -223,50 +269,59 @@ sub tie {
 # subsequent execute() calls.
 #------------------------------------------------------------------------
 
-sub prepare {
-    my $self = shift;
-    my $sql  = shift || return undef;
+sub prepare
+{
+    my ($self,@args) = @_;
+    unless( @args and $args[0] and "" eq ref($args[0]) )
+    {
+	return $self->_throw("prepare called without statement");
+    }
 
-    my $sth = $self->dbh->prepare($sql) 
-        || return $self->_throw("DBI prepare failed: $DBI::errstr");
-    
+    my $sth = $self->dbh()->prepare(@args)
+      || return $self->_throw( "DBI prepare failed: " . $self->dbh()->errstr );
+
     # create wrapper object around handle to return to template client
     $sth = $QUERY->new($sth);
-    push(@{ $self->{ _STH } }, $sth);
+    $self->{_STH} = $sth;
 
     return $sth;
 }
 
-
 #------------------------------------------------------------------------
 # execute()
-# 
+#
 # Calls execute() on the most recent statement created via prepare().
 #------------------------------------------------------------------------
 
-sub execute {
+sub execute
+{
     my $self = shift;
+    my @args = @_ == 1 && ref $_[0] eq 'ARRAY' ? @{ $_[0] } : @_;
 
-    my $sth = $self->{ _STH }->[-1]
-        || return $self->_throw('no query prepared');
+    my $sth = $self->{_STH}
+      || return $self->_throw('no query prepared');
 
-    $sth->execute(@_);
+    $sth->execute(@args);
 }
 
-    
 #------------------------------------------------------------------------
 # query($sql, @params)
 #
 # Prepares and executes a SQL query.
 #------------------------------------------------------------------------
 
-sub query {
-    my $self = shift;
-    my $sql  = shift;
+sub query
+{
+    my ( $self, $sql, @args ) = @_;
+    my @prep = ($sql);
 
-    $self->prepare($sql)->execute(@_);
+    if( @args and $args[0] and ref($args[0]) eq 'HASH' )
+    {
+	push(@prep, shift @args);
+    }
+
+    return $self->prepare(@prep)->execute(@args);
 }
-
 
 #------------------------------------------------------------------------
 # do($sql, \%attr, @bind)
@@ -274,26 +329,27 @@ sub query {
 # Prepares and executes a SQL statement.
 #------------------------------------------------------------------------
 
-sub do {
+sub do
+{
     my $self = shift;
+    my @args = @_ == 1 && ref $_[0] eq 'ARRAY' ? @{ $_[0] } : @_;
 
-    return $self->dbh->do(@_)
-        || $self->_throw("DBI do failed: $DBI::errstr");
+    return $self->dbh()->do(@args)
+      || $self->_throw( "DBI do failed: " . $self->dbh()->errstr );
 }
-
 
 #------------------------------------------------------------------------
 # quote($value [, $data_type ])
 #
-# Returns a quoted string (correct for the connected database) from the 
+# Returns a quoted string (correct for the connected database) from the
 # value passed in.
 #------------------------------------------------------------------------
 
-sub quote {
-    my $self = shift;
-    $self->dbh->quote(@_);
+sub quote
+{
+    my ( $self, @quote_args ) = @_;
+    return $self->dbh()->quote(@quote_args);
 }
-
 
 #------------------------------------------------------------------------
 # dbh()
@@ -302,77 +358,119 @@ sub quote {
 # instance or attempt to create a new one using connect.
 #------------------------------------------------------------------------
 
-sub dbh {
-    my $self = shift;
+sub dbh
+{
+    my $self = $_[0];
 
-    return $self->{ _DBH } || do {
-        $self->connect;
-        $self->{ _DBH };
-    };
+    $self->{_DBH} or $self->connect;
+
+    return $self->{_DBH};
 }
-
 
 #------------------------------------------------------------------------
 # DESTROY
 #
-# Called automatically when the plugin object goes out of scope to 
+# Called automatically when the plugin object goes out of scope to
 # disconnect the database handle cleanly
 #------------------------------------------------------------------------
 
-sub DESTROY {
-    my $self = shift;
-    delete($self->{ _STH });       # first DESTROY any queries
-    $self->{ _DBH }->disconnect() 
-        if $self->{ _DBH } && $self->{ _DBH_CONNECT };
+sub DESTROY
+{
+    my $self = $_[0];
+    delete( $self->{_STH} );    # first DESTROY any queries
+    $self->{_DBH}->disconnect()
+      if ( $self->connected() && $self->{_DBH_CONNECT} );
 }
-
 
 #------------------------------------------------------------------------
 # _throw($error)
 #
-# Raise an error by throwing it via die() as a Template::Exception 
+# Raise an error by throwing it via die() as a Template::Exception
 # object of type 'DBI'.
 #------------------------------------------------------------------------
 
-sub _throw {
-    my $self  = shift;
-    my $error = shift || die "DBI throw() called without an error string\n";
+sub _throw
+{
+    my $self = shift;
+    my $error = shift || croak "DBI throw() called without an error string";
 
     # throw error as DBI exception
-    die (Template::Exception->new('DBI', $error));
+    die( Template::Exception->new( 'DBI', $error ) );
 }
 
+sub fetch
+{
+    my ( $self, $attr ) = @_;
+
+    return $self->_throw("Cannot fetch attribute on not connected \$dbh") unless ( $self->connected() );
+
+    my $dbh = $_[0]->{_DBH};
+    local $@ = undef;
+    my $value;
+    eval { $value = $dbh->{$attr}; };
+    return $self->_throw($@) if ($@);
+
+    return $value;
+}
+
+sub store
+{
+    my ( $self, $attr, $value ) = @_;
+
+    return $self->_throw("Cannot store attribute on not connected \$dbh") unless ( $self->connected() );
+
+    my $dbh = $_[0]->{_DBH};
+    local $@ = undef;
+    eval { $dbh->{$attr} = $value; };
+    return $self->_throw($@) if ($@);
+
+    return 1;
+}
 
 #========================================================================
 # Template::Plugin::DBI::Query
 #========================================================================
 
 package Template::Plugin::DBI::Query;
-use vars qw( $DEBUG $ITERATOR );
+use vars qw( $DEBUG $ITERATOR $AUTOLOAD );
+
+use Scalar::Util qw(blessed);
 
 *DEBUG    = \$Template::Plugin::DBI::DEBUG;
 *ITERATOR = \$Template::Plugin::DBI::ITERATOR;
 
-
-sub new {
-    my ($class, $sth) = @_;
-    bless \$sth, $class;
+sub new
+{
+    my ( $class, $sth ) = @_;
+    my $self = bless( { _STH => $sth }, $class );
 }
 
-sub execute {
+sub execute
+{
     my $self = shift;
+    my @args = @_ == 1 && ref $_[0] eq 'ARRAY' ? @{ $_[0] } : @_;
 
-    $$self->execute(@_) 
-        || return Template::Plugin::DBI->_throw("execute failed: $DBI::errstr");
+    $self->{_STH}->execute(@args)
+      || return Template::Plugin::DBI->_throw( "execute failed: " . $self->{_STH}->errstr );
 
-    $ITERATOR->new($$self);
+    $ITERATOR->new($self);
 }
 
-sub DESTROY {
-    my $self = shift;
-    $$self->finish();
+sub DESTROY
+{
+    undef $_[0]->{_STH};
 }
 
+sub AUTOLOAD
+{
+    my ( $self, @args ) = @_;
+
+    die Template::Exception->new( 'DBI', "$self is not an object" ) unless ( blessed($self) );
+    die Template::Exception->new( 'DBI', "No statement handle" ) unless ( defined( $self->{_STH} ) );
+
+    ( my $name = $AUTOLOAD ) =~ s/.*://;
+    return $self->{_STH}->$name(@args);
+}
 
 #========================================================================
 # Template::Plugin::DBI::Iterator;
@@ -386,39 +484,39 @@ use vars qw( $DEBUG );
 
 *DEBUG = \$Template::Plugin::DBI::DEBUG;
 
-sub new {
-    my ($class, $sth, $params) = @_;
+sub new
+{
+    my ( $class, $sth, $params ) = @_;
 
     my $rows = $sth->rows();
 
-    my $self = bless { 
-        _STH => $sth,
-        SIZE => $rows,
-        MAX  => $rows - 1,
-    }, $class;
+    my $self = bless {
+                       _STH => $sth,
+                       SIZE => $rows,
+                       MAX  => $rows - 1,
+                     }, $class;
 
     return $self;
 }
 
-
 #------------------------------------------------------------------------
 # get_first()
 #
-# Initialises iterator to read from statement handle.  We maintain a 
-# one-record lookahead buffer to allow us to detect if the current 
+# Initialises iterator to read from statement handle.  We maintain a
+# one-record lookahead buffer to allow us to detect if the current
 # record is the last in the series.
 #------------------------------------------------------------------------
 
-sub get_first {
+sub get_first
+{
     my $self = shift;
-    $self->{ _STARTED } = 1;
+    $self->{_STARTED} = 1;
 
     # set some status variables into $self
-    @$self{ qw(  PREV   ITEM FIRST LAST COUNT INDEX ) } 
-            = ( undef, undef,    2,   0,    0,   -1 );
+    @$self{qw(  PREV   ITEM FIRST LAST COUNT INDEX )} = ( undef, undef, 2, 0, 0, -1 );
 
     # support 'number' as an alias for 'count' for backwards compatability
-    $self->{ NUMBER  } = 0;
+    $self->{NUMBER} = 0;
 
     print STDERR "get_first() called\n" if $DEBUG;
 
@@ -430,66 +528,122 @@ sub get_first {
     return $self->get_next();
 }
 
-
 #------------------------------------------------------------------------
 # get_next()
 #
 # Called to read remaining result records from statement handle.
 #------------------------------------------------------------------------
 
-sub get_next {
+sub get_next
+{
     my $self = shift;
-    my ($data, $fixup);
+    my ( $data, $fixup );
 
     # increment the 'index' and 'count' counts
-    $self->{ INDEX  }++;
-    $self->{ COUNT  }++;
-    $self->{ NUMBER }++;   # 'number' is old name for 'count'
+    $self->{INDEX}++;
+    $self->{COUNT}++;
+    $self->{NUMBER}++;    # 'number' is old name for 'count'
 
     # decrement the 'first-record' flag
-    $self->{ FIRST }-- if $self->{ FIRST };
+    $self->{FIRST}-- if $self->{FIRST};
 
     # we should have a row already cache in NEXT
-    return (undef, Template::Constants::STATUS_DONE)
-        unless $data = $self->{ NEXT };
-    
+    return ( undef, Template::Constants::STATUS_DONE )
+      unless $data = $self->{NEXT};
+
     # set PREV to be current ITEM from last iteration
-    $self->{ PREV } = $self->{ ITEM };
+    $self->{PREV} = $self->{ITEM};
 
     # look ahead to the next row so that the rowcache is refilled
     $self->_fetchrow();
 
-    $self->{ ITEM } = $data;
-    return ($data, Template::Constants::STATUS_OK);
+    $self->{ITEM} = $data;
+    return ( $data, Template::Constants::STATUS_OK );
 }
 
-
-sub get {
+sub get
+{
     my $self = shift;
-    my ($data, $error);
+    my ( $data, $error );
 
-    ($data, $error) = $self->{ _STARTED } 
-		    ? $self->get_next() : $self->get_first();
+    ( $data, $error ) = $self->{_STARTED} ? $self->get_next() : $self->get_first();
 
     return $data;
 }
 
-
-sub get_all {
+sub get_all
+{
     my $self = shift;
-    my $sth  = $self->{ _STH };
+    my $sth  = $self->{_STH};
+
+    my $data = $sth->fetchall_arrayref( {} );
+    $self->throw( $sth->errstr ) if ( $sth->err() );
+    unshift( @$data, $self->{NEXT} ) if $self->{NEXT};
+    $self->{LAST} = 1;
+    $self->{NEXT} = undef;
+
+    return $data;
+}
+
+sub get_colnames
+{
+    my $self = shift;
+    my $sth  = $self->{_STH};
     my $error;
 
-    my $data = $sth->fetchall_arrayref({});
-    $self->throw($error) if ($error = $sth->err());
-    unshift(@$data, $self->{ NEXT }) if $self->{ NEXT };
-    $self->{ LAST } = 1;
-    $self->{ NEXT } = undef;
-    $sth->finish();
+    my $data = $sth->{NAME_lc};
+    $self->throw( $sth->errstr ) if ( $sth->err() );
 
     return $data;
 }
 
+sub get_COLnames
+{
+    my $self = shift;
+    my $sth  = $self->{_STH};
+
+    my $data = $sth->{NAME_uc};
+    $self->throw( $sth->errstr ) if ( $sth->err() );
+
+    return $data;
+}
+
+sub get_all_list
+{
+    my $self = shift;
+    my $sth  = $self->{_STH};
+
+    my $data = $sth->fetchall_arrayref();
+    $self->throw( $sth->errstr ) if ( $sth->err() );
+    if ( $self->{NEXT} )
+    {
+        my $fetch_hash_key_name = $self->{_STH}->{FetchHashKeyName};
+        my @cols                = @{ $self->{_STH}->{$fetch_hash_key_name} };
+        my @row                 = @{ $self->{NEXT} }[@cols];
+        unshift( @$data, \@row );
+    }
+    $self->{LAST} = 1;
+    $self->{NEXT} = undef;
+
+    return $data;
+}
+
+sub rows
+{
+    return $_[0]->{SIZE};
+}
+
+sub fetch
+{
+    my ( $self, $attr ) = @_;
+    $self->{_STH}->FETCH($attr);
+}
+
+sub store
+{
+    my ( $self, $attr, $value ) = @_;
+    return $self->{_STH}->STORE( $attr, $value );
+}
 
 #------------------------------------------------------------------------
 # _fetchrow()
@@ -497,23 +651,22 @@ sub get_all {
 # Retrieve a record from the statement handle and store in row cache.
 #------------------------------------------------------------------------
 
-sub _fetchrow {
+sub _fetchrow
+{
     my $self = shift;
-    my $sth  = $self->{ _STH };
+    my $sth  = $self->{_STH};
 
-    my $data = $sth->fetchrow_hashref() || do {
-        $self->{ LAST } = 1;
-        $self->{ NEXT } = undef;
-        $sth->finish();
+    my $data = $sth->fetchrow_hashref() || do
+    {
+        $self->{LAST} = 1;
+        $self->{NEXT} = undef;
         return;
     };
-    $self->{ NEXT } = $data;
+    $self->{NEXT} = $data;
     return;
 }
 
-
 1;
-
 
 __END__
 
@@ -797,7 +950,7 @@ to reuse it by passing it as the 'dbh' parameter.
 
     [% DBI.connect( dbh = my_dbh_ref ) %]
 
-=head2 query($sql)
+=head2 query($sql,[\%args],[@bind_values])
 
 This method submits an SQL query to the database and creates an iterator 
 object to return the results.  This may be used directly in a FOREACH 
@@ -808,7 +961,7 @@ from the query result set as required for memory efficiency.
        Each [% user.field %] can be printed here
     [% END %]
 
-=head2 prepare($sql)
+=head2 prepare($sql,[\%args])
 
 Prepare a query for later execution.  This returns a compiled query
 object (of the Template::Plugin::DBI::Query class) on which the
@@ -816,7 +969,7 @@ execute() method can subsequently be called.
 
     [% query = DBI.prepare('SELECT * FROM users WHERE id = ?') %]
 
-=head2 execute(@args)
+=head2 execute(@bind_values)
 
 Execute a previously prepared query.  This method should be called on
 the query object returned by the prepare() method.  Returns an
@@ -832,7 +985,7 @@ iterator object which can be used directly in a FOREACH directive.
        [% minion.name %]
     [% END %]
 
-=head2 do($sql)
+=head2 do($sql,[\%attr,[@bind_values]])
 
 The do() method executes a sql statement from which no records are
 returned.  It will return true if the statement was successful
@@ -899,13 +1052,69 @@ See L<Tie::DBI> for further information on the 'CLOBBER' option.
 Calls the quote() method on the underlying DBI handle to quote the value
 specified in the appropriate manner for its type.
 
-=head2 dbh()
+=head2 dbh
+
+  [% DBI.dbh() %]
 
 Return the database handle currently in use by the plugin.
 
-=head2 disconnect()
+=head2 disconnect
+
+  [% DBI.disconnect() %]
 
 Disconnects the current database.
+
+=head2 fetch
+
+  [% DBI.fetch('Name') %]
+
+Fetches an attribute from the connected database handle.
+Throws an exception when not connected.
+
+=head2 store
+
+  [% DBI.store('RowCacheSize',0) %]
+
+Stores an attribute in the connected database handle.
+Throws an exception when not connected.
+
+=head1 ITERATOR METHODS
+
+=head2 get_all
+
+  [% allhash = result.get_all() %]
+
+Returns all (remaining) rows as a hash.
+
+=head2 get_all_list
+
+  [% allhash = result.get_all_list() %]
+
+Returns all (remaining) rows as a list.
+
+=head2 rows
+
+Returns the number of affected rows of the executed statement.
+
+=head2 get_colnames
+
+Returns the lowercase column names (C<$sth> attribute C<< ->{NAME_lc} >>).
+
+=head2 get_COLnames
+
+Returns the uppercase column names (C<$sth> attribute C<< ->{NAME_uc} >>).
+
+=head2 fetch
+
+Fetches an attribute from the statement handle.
+
+  [% result.fetch('FetchHashKeyName') %]
+
+=head2 store
+
+Stores an attribute to the statement handle.
+
+  [% result.store('FetchHashKeyName','NAME_lc') %]
 
 =head1 AUTHORS
 
@@ -914,11 +1123,12 @@ distributed as a separate module.  It was integrated into the Template
 Toolkit distribution for version 2.00 and includes contributions from
 Andy Wardley, Craig Barratt, Dave Hodgkinson and Rafael Kitover. Andy
 Wardley extracted it back into a separate distribution in May 2006.
+After that, in 2010 Jens Rehsack maintains this distribution.
 
 =head1 COPYRIGHT
 
-Copyright (C) 1999-2006 Simon Matthews, Andy Wardley.  All Rights
-Reserved.
+  Copyright (C) 1999-2006 Simon Matthews, Andy Wardley.  All Rights Reserved.
+  Copyright (C) 2010 Jens Rehsack.  All Rights Reserved
 
 This module is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.

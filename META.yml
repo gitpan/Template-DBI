@@ -1,12 +1,33 @@
-# http://module-build.sourceforge.net/META-spec.html
-#XXXXXXX This is a prototype!!!  It will change in the future!!! XXXXX#
-name:         Template-DBI
-version:      2.64
-version_from: lib/Template/Plugin/DBI.pm
-installdirs:  site
+--- #YAML:1.0
+name:               Template-DBI
+version:            2.65
+abstract:           Template interface to the DBI module
+author:
+    - Andy Wardley <abw@wardley.org>, Jens Rehsack <rehsack@cpan.org>
+license:            perl
+distribution_type:  module
+configure_requires:
+    ExtUtils::MakeMaker:  0
+build_requires:
+    MLDBM:           0
+    SQL::Statement:  1.28
 requires:
-    DBI:                           1
-    Template:                      2.15
-
-distribution_type: module
-generated_by: ExtUtils::MakeMaker version 6.17
+    DBI:       1.612
+    perl:      5.008
+    Template:  2.22
+resources:
+    license:      http://dev.perl.org/licenses/
+    MailingList:  mailto:templates@template-toolkit.org
+    repository:   svn://svn.tt2.org/tt/Template-DBI/trunk/
+no_index:
+    directory:
+        - t
+        - inc
+generated_by:       ExtUtils::MakeMaker version 6.56
+meta-spec:
+    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
+    version:  1.4
+recommends:
+    MLDBM:                0
+    SQL::Statement:       1.28
+    threads::variable::reap:  0.05

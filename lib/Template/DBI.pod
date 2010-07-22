@@ -26,11 +26,12 @@ distributed as a separate module.  It was integrated into the Template
 Toolkit distribution for version 2.00 and included contributions from
 Andy Wardley, Craig Barratt, Dave Hodgkinson and Rafael Kitover.  Andy
 Wardley extracted it back into a separate distribution in May 2006.
+After that, in 2010 Jens Rehsack maintains this distribution.
 
 =head1 COPYRIGHT
 
-Copyright (C) 1999-2006 Simon Matthews, Andy Wardley.  All Rights
-Reserved
+  Copyright (C) 1999-2006 Simon Matthews, Andy Wardley.  All Rights Reserved
+  Copyright (C) 2010 Jens Rehsack.  All Rights Reserved
 
 This module is free software; you can redistribute it and/or modify it
 under the same terms as Perl itself.

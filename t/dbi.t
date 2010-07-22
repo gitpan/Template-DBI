@@ -1,4 +1,6 @@
-#============================================================= -*-perl-*-
+# -*-perl-*-
+
+#========================================================================
 #
 # t/dbi.t
 #
@@ -12,184 +14,42 @@
 #========================================================================
 
 use strict;
-use lib qw( ./lib ../lib ./blib/lib ./blib/arch ../blib/lib ../blib/arch );
-use vars qw( $DEBUG $PK $run $dsn $user $pass );
+use warnings;
+
+do "t/lib.pl";
+
 use Template::Test;
 use Template::Stash;
-use File::Spec::Functions qw( catfile );
+use DBI;
 
-$^W = 1;
-$DEBUG = 0;
 $Template::Test::PRESERVE = 1;
 
-our $CONFIG_DIR  = -d 't' ? 't' : '.';
-our $CONFIG_FILE = 'dbi_test.cfg';
-our $CONFIG_PATH = catfile($CONFIG_DIR, $CONFIG_FILE);
-
+my $dbh = connect_database();
+unless ($dbh)
+{
+    BAIL_OUT("Unable to connect to the database $DBI::errstr\nTests skipped.\n");
+    exit 0;
+}
 
 #------------------------------------------------------------------------
 # See if DBI and Tie::DBI are installed
 #------------------------------------------------------------------------
 
-eval "use DBI";
-if ($@) {
-    skip_all("DBI module not installed");
-}
-
-eval "use Tie::DBI";
-my $tiedbi = $@ ? 0 : 1;
-
 # warn "Tie::DBI not found, skipping those tests\n" unless $tiedbi;
-
-#------------------------------------------------------------------------
-# load the configuration file created by Makefile.PL which defines
-# the $run, $dsn, $user and $pass variables.
-#------------------------------------------------------------------------
-
-eval { require "$CONFIG_PATH" };
-if ($@) {
-    skip_all("cannot load $CONFIG_PATH");
-}
-unless ($run) {
-    skip_all('skipping DBI tests at user request');
-}
-
-# new feature in DBI plugin v2.30+ is to allow user to drop initial 'dbi:'
-my $short_dsn = $dsn;
-$short_dsn =~ s/^dbi://i;
-
-# another hack: if we want to test Tie::DBI updates then we have to build
-# database with primary keys to force uniqueness.  However, different database
-# have different ways of defining primary keys, so we're only going to test
-# it on mysql 
-$PK = ($short_dsn =~ /^mysql/i) ? 'PRIMARY KEY' : '';
-
-my $attr = { 
-    PrintError => 0,
-    ChopBlanks => 1,
-};
-
-my $dbh;
-eval {
-    $dbh = DBI->connect($dsn, $user, $pass, $attr);
-};
-
-if ($@ || ! $dbh) {
-    warn <<EOF;
-DBI connect() failed:
-    $DBI::errstr
-
-Please ensure that your database server is running and that you specified
-the correct connection parameters.  If necessary, re-run the Makefile.PL
-and specify new parameters, or answer 'n' when prompted: 
-
-  - Do you want to run the DBI tests?
-
-EOF
-    ntests(1);
-    ok(0);
-    exit(0);
-};
 
 init_database($dbh);
 
-my $vars = {
-    dbh    => $dbh,
-    dsn    => $dsn,
-    user   => $user,
-    pass   => $pass,
-    attr   => $attr,
-    short  => $short_dsn,
-    mysql  => $PK ? 1 : 0,
-    tiedbi => $tiedbi,
-};
+my $vars = get_tt_test_vars();
 
 # NOTE: Template::Stash::XS does not handle tied hashes so we must force
 # the use of the regular Template::Stash
 my $stash = Template::Stash->new($vars);
 
-test_expect(\*DATA, { STASH => $stash }, $vars);
+test_expect( \*DATA, { STASH => $stash }, $vars );
 
 cleanup_database($dbh);
 
 $dbh->disconnect();
-
-#------------------------------------------------------------------------
-# init_database($dsn, $user, $pass)
-#------------------------------------------------------------------------
-
-sub init_database {
-    my $dbh = shift;
-
-    # ensure tables don't already exist (in case previous test run failed).
-    sql_query($dbh, 'DROP TABLE usr', 1);
-    sql_query($dbh, 'DROP TABLE grp', 1);
-
-    # create some tables
-    sql_query($dbh, "CREATE TABLE grp ( 
-                         id Char(16) $PK, 
-                         name Char(32) 
-                     )");
-
-    sql_query($dbh, "CREATE TABLE usr  ( 
-                         id Char(16) $PK, 
-                         name Char(32),
-                         grp Char(16)
-                     )");
-
-    # add some records to the 'grp' table
-    sql_query($dbh, "INSERT INTO grp 
-                     VALUES ('foo', 'The Foo Group')");
-    sql_query($dbh, "INSERT INTO grp 
-                     VALUES ('bar', 'The Bar Group')");
-    sql_query($dbh, "INSERT INTO grp 
-                     VALUES ('baz', 'The Baz Group')");
-
-    # add some records to the 'usr' table
-    sql_query($dbh, "INSERT INTO usr 
-		     VALUES ('abw', 'Andy Wardley', 'foo')");
-    sql_query($dbh, "INSERT INTO usr 
-		     VALUES ('sam', 'Simon Matthews', 'foo')");
-
-    sql_query($dbh, "INSERT INTO usr 
-		     VALUES ('hans', 'Hans von Lengerke', 'bar')");
-    sql_query($dbh, "INSERT INTO usr 
-		     VALUES ('mrp', 'Martin Portman', 'bar')");
-
-    sql_query($dbh, "INSERT INTO usr 
-		     VALUES ('craig', 'Craig Barratt', 'baz')");
-
-}
-
-
-#------------------------------------------------------------------------
-# sql_query($dbh, $sql, $quiet)
-#------------------------------------------------------------------------
-
-sub sql_query {
-    my ($dbh, $sql, $quiet) = @_;
-
-    my $sth = $dbh->prepare($sql) 
-	|| warn "prepare() failed: $DBI::errstr\n";
-
-    $sth->execute() 
-	|| $quiet || warn "execute() failed: $DBI::errstr\n";
-    
-    $sth->finish();
-}
-
-
-#------------------------------------------------------------------------
-# cleanup_database($dsn, $user, $pass)
-#------------------------------------------------------------------------
-
-sub cleanup_database {
-    my $dbh = shift;
-
-    sql_query($dbh, 'DROP TABLE usr');
-    sql_query($dbh, 'DROP TABLE grp');
-};
-
 
 #========================================================================
 
@@ -265,9 +125,9 @@ __END__
 -- test --
 [% USE DBI -%]
 [% TRY;
-     DBI.query('blah blah'); 
+     DBI.query('blah blah');
    CATCH; 
-     error; 
+     error;
    END 
 %]
 -- expect --
