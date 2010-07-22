@@ -12,6 +12,7 @@ Revision history for Template-DBI
 	- add ability to fetch and store $dbh and $sth attributes
 	- reap DBI handles for new threads when used in threaded
 	  environments and threads::variable::reap is available
+	- add test with two placeholders
 
 2.64    2006-05-25
 	- last release by Andy Wardley

@@ -195,6 +195,17 @@ DBI error - data source not defined
 5: sam - Simon Matthews
 
 -- test --
+[% USE dbi(dsn, user, pass, attr) -%]
+[% names = [ 'abw', 'sam' ] -%]
+[% query = dbi.prepare('SELECT * FROM usr WHERE id IN (?,?) ORDER BY id') -%]
+[% FOREACH user = query.execute(names) -%]
+[% loop.number %]: [% user.id %] - [% user.name %]
+[% END %]
+-- expect --
+1: abw - Andy Wardley
+2: sam - Simon Matthews
+
+-- test --
 # DBI plugin before TT 2.00 used 'count' instead of 'number'
 [% USE dbi(dsn, user, pass, attr) -%]
 [% FOREACH user = dbi.query('SELECT * FROM usr ORDER BY id') -%]

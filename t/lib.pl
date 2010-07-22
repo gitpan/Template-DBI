@@ -15,8 +15,10 @@ use File::Path;
 use File::Spec;
 
 my %v;
-eval "require $_; \$v{'$_'} = \$_::VERSION;" for qw(
-  DBI Template );
+my @req = qw(DBI Template Template::Plugin::DBI);
+my @eval = map { qq{require $_;\n\$v{"$_"} = $_->VERSION ()} } @req;
+$@ = undef;
+eval $_ for @eval;
 
 if ($@)
 {
