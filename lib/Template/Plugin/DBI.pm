@@ -591,7 +591,7 @@ sub get_colnames
     my $sth  = $self->{_STH};
     my $error;
 
-    my $data = $sth->{NAME_lc};
+    my $data = $sth->{_STH}->{NAME_lc};
     $self->throw( $sth->errstr ) if ( $sth->err() );
 
     return $data;
@@ -602,7 +602,7 @@ sub get_COLnames
     my $self = shift;
     my $sth  = $self->{_STH};
 
-    my $data = $sth->{NAME_uc};
+    my $data = $sth->{_STH}->{NAME_uc};
     $self->throw( $sth->errstr ) if ( $sth->err() );
 
     return $data;
